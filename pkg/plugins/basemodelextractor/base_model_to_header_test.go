@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -118,7 +119,7 @@ func TestBaseModelToHeaderPluginFactory(t *testing.T) {
 
 			// Create a handle using the test manager
 			datastores := datastore.NewDatastores()
-			handle := framework.NewHandle(context.Background(), mgr, datastores)
+			handle := framework.NewHandle(context.Background(), mgr, datastores, 100*time.Millisecond)
 
 			p, err := BaseModelToHeaderPluginFactory(tt.pluginName, tt.rawParams, handle)
 			if err != nil {
