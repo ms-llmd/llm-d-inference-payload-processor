@@ -47,11 +47,11 @@ type datastoreSnapshot struct {
 
 // payloadProcessorHandle is an implementation of the Handle interface.
 type payloadProcessorHandle struct {
-	ctx               context.Context
-	mgr               ctrl.Manager
-	datastores        *datastore.Datastores
-	snapshotCache     sync.Map
-	snapshotLifecycle time.Duration
+	ctx              context.Context
+	mgr              ctrl.Manager
+	datastores       *datastore.Datastores
+	snapshotCache    sync.Map
+	snapshotLifetime time.Duration
 }
 
 // Context returns a context the plugins can use, if they need one
@@ -67,17 +67,17 @@ func (h *payloadProcessorHandle) ReconcilerBuilder() *ctrlbuilder.Builder {
 	return ctrl.NewControllerManagedBy(h.mgr)
 }
 
-func NewHandle(ctx context.Context, mgr ctrl.Manager, datastores *datastore.Datastores) Handle {
+func NewHandle(ctx context.Context, mgr ctrl.Manager, datastores *datastore.Datastores, snapshotLifetime time.Duration) Handle {
 	return &payloadProcessorHandle{
-		ctx:               ctx,
-		mgr:               mgr,
-		datastores:        datastores,
-		snapshotLifecycle: 100 * time.Millisecond,
+		ctx:              ctx,
+		mgr:              mgr,
+		datastores:       datastores,
+		snapshotLifetime: snapshotLifetime,
 	}
 }
 
 // DatastoreSnapshot creates a snapshot of the datastore topic and stores it in CycleState.
-// It uses a Handle-level cache with 100ms lifecycle to optimize performance for concurrent requests.
+// It uses a Handle-level cache to optimize performance for concurrent requests.
 // Returns the snapshot stored in CycleState for the current request.
 func (h *payloadProcessorHandle) DatastoreSnapshot(datastoreTopic string, state *CycleState) (datastore.AttributeMap, error) {
 	if datastoreTopic == "" {
@@ -91,8 +91,8 @@ func (h *payloadProcessorHandle) DatastoreSnapshot(datastoreTopic string, state 
 	now := time.Now()
 	if cached, ok := h.snapshotCache.Load(datastoreTopic); ok {
 		if snapshot, ok := cached.(*datastoreSnapshot); ok {
-			// Validate expiration (100ms lifecycle)
-			if now.Sub(snapshot.timestamp) < h.snapshotLifecycle {
+			// Validate expiration
+			if now.Sub(snapshot.timestamp) < h.snapshotLifetime {
 				// Clone from Handle cache to CycleState
 				cycleSnapshot := snapshot.snapshot.Clone()
 				state.Write(datastoreTopic, cycleSnapshot)

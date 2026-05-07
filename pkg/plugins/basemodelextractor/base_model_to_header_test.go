@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,8 +34,9 @@ import (
 )
 
 const (
-	testBaseModel = "qwen3-8b"
-	testAdapter   = "finance-adapter"
+	testBaseModel           = "qwen3-8b"
+	testAdapter             = "finance-adapter"
+	defaultSnapshotLifetime = 100 * time.Millisecond
 )
 
 // TestBaseModelToHeaderPlugin_TypedName tests the TypedName method returns correct type and name.
@@ -118,7 +120,7 @@ func TestBaseModelToHeaderPluginFactory(t *testing.T) {
 
 			// Create a handle using the test manager
 			datastores := datastore.NewDatastores()
-			handle := framework.NewHandle(context.Background(), mgr, datastores)
+			handle := framework.NewHandle(context.Background(), mgr, datastores, defaultSnapshotLifetime)
 
 			p, err := BaseModelToHeaderPluginFactory(tt.pluginName, tt.rawParams, handle)
 			if err != nil {

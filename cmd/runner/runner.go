@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/pflag"
@@ -47,7 +48,10 @@ import (
 	"github.com/llm-d/llm-d-inference-payload-processor/version"
 )
 
-const modelField = "model"
+const (
+	modelField              = "model"
+	defaultSnapshotLifetime = 100 * time.Millisecond
+)
 
 var setupLog = ctrl.Log.WithName("setup")
 
@@ -171,7 +175,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	datastores := datastore.NewDatastores()
-	handle := framework.NewHandle(ctx, mgr, datastores)
+	handle := framework.NewHandle(ctx, mgr, datastores, defaultSnapshotLifetime)
 
 	// Register factories for all known in-tree plugins
 	r.registerInTreePlugins()
