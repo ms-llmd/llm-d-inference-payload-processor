@@ -70,7 +70,7 @@ func (h *payloadProcessorHandle) ReconcilerBuilder() *ctrlbuilder.Builder {
 // GetDatastoreSnapshot creates a snapshot of the datastore topic and stores it in CycleState.
 // It uses a Handle-level cache to optimize performance for concurrent requests.
 // Returns the snapshot stored in CycleState for the current request.
-func (h *payloadProcessorHandle) GetDatastoreSnapshot(datastoreTopic string, state *CycleState) (datastore.AttributeMap, error) {
+func (h *payloadProcessorHandle) GetDatastoreTopicSnapshot(datastoreTopic string, state *CycleState) (datastore.AttributeMap, error) {
 	if datastoreTopic == "" {
 		return nil, errors.New("datastoreTopic cannot be empty")
 	}
