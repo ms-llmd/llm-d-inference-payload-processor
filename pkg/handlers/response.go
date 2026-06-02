@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -188,7 +189,7 @@ func parseSSEResponseBody(body []byte) (map[string]any, error) {
 	}
 
 	if len(result) == 0 {
-		return nil, fmt.Errorf("no parseable SSE data events found")
+		return nil, errors.New("no parseable SSE data events found")
 	}
 
 	return result, nil
