@@ -52,6 +52,18 @@ func LoadConfiguration(configBytes []byte, handle plugin.Handle, logger logr.Log
 		return nil, err
 	}
 
+	if err = applyPluginDefaults(rawConfig, handle); err != nil {
+		logger.Error(err, "failed to inject default plugins")
+		return nil, err
+	}
+
+	var profilePicker requesthandling.ProfilePicker
+	var ok bool
+	if profilePicker, ok = handle.Plugin(rawConfig.ProfilePicker.PluginRef).(requesthandling.ProfilePicker); !ok {
+		err = fmt.Errorf("the profilePicker referenced in the configuration (%s) is not a requesthandling.ProfilePicker", rawConfig.ProfilePicker.PluginRef)
+		logger.Error(err, "failed to load the configuration")
+	}
+
 	profiles, err := buildProfiles(rawConfig.Profiles, handle)
 	if err != nil {
 		logger.Error(err, "failed to load one or more profiles")
@@ -65,6 +77,7 @@ func LoadConfiguration(configBytes []byte, handle plugin.Handle, logger logr.Log
 	}
 
 	return &config.Config{
+		ProfilePicker:       profilePicker,
 		Profiles:            profiles,
 		NotificationSources: notificationSources,
 	}, nil
@@ -138,12 +151,12 @@ func instantiatePlugins(configuredPlugins []configapi.PluginSpec, handle plugin.
 	return nil
 }
 
-func buildProfiles(rawProfiles []configapi.Profile, handle plugin.Handle) (map[string]requesthandling.Profile, error) {
+func buildProfiles(rawProfiles []configapi.Profile, handle plugin.Handle) (map[string]*requesthandling.Profile, error) {
 	if len(rawProfiles) == 0 {
 		return nil, errors.New("at least one profile must be specified")
 	}
 
-	profiles := map[string]requesthandling.Profile{}
+	profiles := map[string]*requesthandling.Profile{}
 
 	for _, rawProfile := range rawProfiles {
 		if len(rawProfile.Name) == 0 {
@@ -185,7 +198,7 @@ func buildProfiles(rawProfiles []configapi.Profile, handle plugin.Handle) (map[s
 			theProfile.ResponsePlugins[idx] = thePlugin
 		}
 
-		profiles[rawProfile.Name] = theProfile
+		profiles[rawProfile.Name] = &theProfile
 	}
 
 	return profiles, nil

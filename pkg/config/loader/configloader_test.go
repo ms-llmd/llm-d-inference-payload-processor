@@ -34,6 +34,7 @@ import (
 	"github.com/llm-d/llm-d-inference-payload-processor/pkg/framework/plugins/datalayer/notificationsource"
 	"github.com/llm-d/llm-d-inference-payload-processor/pkg/framework/plugins/requesthandling/basemodelextractor"
 	"github.com/llm-d/llm-d-inference-payload-processor/pkg/framework/plugins/requesthandling/bodyfieldtoheader"
+	"github.com/llm-d/llm-d-inference-payload-processor/pkg/framework/plugins/requesthandling/profilepicker/single"
 )
 
 // Define constants for test plugins.
@@ -41,6 +42,7 @@ import (
 const (
 	testPickerType       = "test-picker"
 	testPluginType       = "test-plugin"
+	testProfilePicker    = "test-profile-picker"
 	testRequestProcType  = "test-request-processor"
 	testResponseProcType = "test-response-processor"
 	testScorerType       = "test-scorer"
@@ -214,52 +216,107 @@ func TestInstantiatePlugins(t *testing.T) {
 	}
 }
 
-// --- Mocks ---
+func TestBuildProfiles(t *testing.T) {
+	// Not parallel because it modifies global plugin registry.
+	registerTestPlugins(t)
+	plugin.Register(single.SingleProfilePickerType, single.SingleProfilePickerFactory)
 
-type mockPlugin struct {
-	t plugin.TypedName
-}
+	tests := []struct {
+		name       string
+		configText string
+		validate   func(*testing.T, *configapi.PayloadProcessorConfig, map[string]*requesthandling.Profile, plugin.Handle)
+		wantErr    bool
+	}{
+		{
+			name:       "successConfigWithProfile",
+			configText: successConfigWithProfileText,
+			validate: func(t *testing.T, rawConfig *configapi.PayloadProcessorConfig, profiles map[string]*requesthandling.Profile, handle plugin.Handle) {
+				require.Equal(t, rawConfig.ProfilePicker.PluginRef, testProfilePicker, "incorrect profile picker")
+				require.Equal(t, 1, len(profiles), "there should only be one profile")
+				require.NotNil(t, profiles["default"], "the profile `default` wasn't created")
+				require.Equal(t, 1, len(profiles["default"].RequestPlugins), "there should be one request plugin")
+				require.Equal(t, 1, len(profiles["default"].ResponsePlugins), "there should be one response plugin")
+			},
+			wantErr: false,
+		},
+		{
+			name:       "successConfigWithTwoProfiles",
+			configText: successConfigWithTwoProfilesText,
+			validate: func(t *testing.T, rawConfig *configapi.PayloadProcessorConfig, profiles map[string]*requesthandling.Profile, handle plugin.Handle) {
+				require.Equal(t, rawConfig.ProfilePicker.PluginRef, testProfilePicker, "incorrect profile picker")
+				require.Equal(t, 2, len(profiles), "there should be two profiles")
+				require.NotNil(t, profiles["one"], "the profile `one` wasn't created")
+				require.NotNil(t, profiles["two"], "the profile `two` wasn't created")
+				require.Equal(t, 1, len(profiles["one"].RequestPlugins), "there should be one request plugin")
+				require.Equal(t, 0, len(profiles["one"].ResponsePlugins), "there should be no response plugins")
+				require.Equal(t, 0, len(profiles["two"].RequestPlugins), "there should be no request plugins")
+				require.Equal(t, 1, len(profiles["two"].ResponsePlugins), "there should be one response plugin")
+			},
+			wantErr: false,
+		},
+		{
+			name:       "successConfigWithNoProfilePicker",
+			configText: successConfigWithNoProfilePickerText,
+			validate: func(t *testing.T, rawConfig *configapi.PayloadProcessorConfig, profiles map[string]*requesthandling.Profile, handle plugin.Handle) {
+				require.Equal(t, rawConfig.ProfilePicker.PluginRef, single.SingleProfilePickerType, "incorrect profile picker")
+				require.Equal(t, 3, len(handle.GetAllPlugins()), "not enough plugins were instantiated")
+				require.Equal(t, 1, len(profiles), "there should only be one profile")
+				require.NotNil(t, profiles["default"], "the profile `default` wasn't created")
+				require.Equal(t, 1, len(profiles["default"].RequestPlugins), "there should be one request plugin")
+				require.Equal(t, 1, len(profiles["default"].ResponsePlugins), "there should be one response plugin")
+			},
+			wantErr: false,
+		},
+		{
+			name:       "successConfigWithProfilePickerNotReferenced",
+			configText: successConfigWithProfilePickerNotReferencedText,
+			validate: func(t *testing.T, rawConfig *configapi.PayloadProcessorConfig, profiles map[string]*requesthandling.Profile, handle plugin.Handle) {
+				require.Equal(t, rawConfig.ProfilePicker.PluginRef, testProfilePicker, "incorrect profile picker")
+				require.Equal(t, 1, len(profiles), "there should only be one profile")
+				require.NotNil(t, profiles["default"], "the profile `default` wasn't created")
+				require.Equal(t, 1, len(profiles["default"].RequestPlugins), "there should be one request plugin")
+				require.Equal(t, 1, len(profiles["default"].ResponsePlugins), "there should be one response plugin")
+			},
+			wantErr: false,
+		},
+		{
+			name:       "errorConfigWithTwoProfilesNoPicker",
+			configText: errorConfigWithTwoProfilesNoPickerText,
+			wantErr:    true,
+		},
+	}
 
-func (m *mockPlugin) TypedName() plugin.TypedName { return m.t }
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			logger := logging.NewTestLogger()
 
-// Mock RequestProcessor
-type mockRequestProcessor struct{ mockPlugin }
+			rawConfig, err := loadRawConfiguration([]byte(tc.configText), logger)
+			require.NoError(t, err, "setup: loadRawConfiguration failed")
 
-// compile-time type assertion
-var _ requesthandling.RequestProcessor = &mockRequestProcessor{}
+			handle := plugin.NewHandle(context.Background(), nil, nil)
+			err = instantiatePlugins(rawConfig.Plugins, handle)
+			require.NoError(t, err, "setup: instantiatePlugins failed")
 
-func (m *mockRequestProcessor) ProcessRequest(ctx context.Context, cycleState *plugin.CycleState, request *requesthandling.InferenceRequest) error {
-	return nil
-}
+			err = applyPluginDefaults(rawConfig, handle)
+			if tc.wantErr && err != nil {
+				return
+			}
 
-// Mock ResponseProcessor
-type mockResponseProcessor struct{ mockPlugin }
+			profiles, errProf := buildProfiles(rawConfig.Profiles, handle)
+			if tc.wantErr {
+				if err == nil && errProf == nil {
+					t.Logf("either applyPluginDefaults or buildProfiles was suppose to fail")
+				}
+				return
+			}
 
-// compile-time type assertion
-var _ requesthandling.ResponseProcessor = &mockResponseProcessor{}
-
-func (m *mockResponseProcessor) ProcessResponse(ctx context.Context, cycleState *plugin.CycleState, request *requesthandling.InferenceResponse) error {
-	return nil
-}
-
-// Mock Scorer
-type mockScorer struct{ mockPlugin }
-
-// compile-time type assertion
-var _ modelselector.Scorer = &mockScorer{}
-
-func (m *mockScorer) Score(ctx context.Context, cycleState *plugin.CycleState, request *requesthandling.InferenceRequest, models []datalayer.Model) map[datalayer.Model]float64 {
-	return nil
-}
-
-// Mock Picker
-type mockPicker struct{ mockPlugin }
-
-// compile-time type assertion
-var _ modelselector.Picker = &mockPicker{}
-
-func (m *mockPicker) Pick(ctx context.Context, cycleState *plugin.CycleState, scoredModels []*modelselector.ScoredModel) *modelselector.ProfileRunResult {
-	return nil
+			require.NoError(t, err, "applyDefaultPlugins failed")
+			require.NoError(t, errProf, "buildProfiles failed")
+			if tc.validate != nil {
+				tc.validate(t, rawConfig, profiles, handle)
+			}
+		})
+	}
 }
 
 func TestBuildDatalayer(t *testing.T) {
@@ -318,6 +375,65 @@ func TestBuildDatalayer(t *testing.T) {
 	}
 }
 
+// --- Mocks ---
+
+type mockPlugin struct {
+	t plugin.TypedName
+}
+
+func (m *mockPlugin) TypedName() plugin.TypedName { return m.t }
+
+// Mock ProfilePicker
+type mockProfilePicker struct{ mockPlugin }
+
+// compiel-time type assertion
+var _ requesthandling.ProfilePicker = &mockProfilePicker{}
+
+func (m *mockProfilePicker) Pick(ctx context.Context, cycleState *plugin.CycleState, request *requesthandling.InferenceRequest,
+	profiles map[string]*requesthandling.Profile) (*requesthandling.Profile, error) {
+	return nil, nil
+}
+
+// Mock RequestProcessor
+type mockRequestProcessor struct{ mockPlugin }
+
+// compile-time type assertion
+var _ requesthandling.RequestProcessor = &mockRequestProcessor{}
+
+func (m *mockRequestProcessor) ProcessRequest(ctx context.Context, cycleState *plugin.CycleState, request *requesthandling.InferenceRequest) error {
+	return nil
+}
+
+// Mock ResponseProcessor
+type mockResponseProcessor struct{ mockPlugin }
+
+// compile-time type assertion
+var _ requesthandling.ResponseProcessor = &mockResponseProcessor{}
+
+func (m *mockResponseProcessor) ProcessResponse(ctx context.Context, cycleState *plugin.CycleState, request *requesthandling.InferenceResponse) error {
+	return nil
+}
+
+// Mock Scorer
+type mockScorer struct{ mockPlugin }
+
+// compile-time type assertion
+var _ modelselector.Scorer = &mockScorer{}
+
+func (m *mockScorer) Score(ctx context.Context, cycleState *plugin.CycleState, request *requesthandling.InferenceRequest, models []datalayer.Model) map[datalayer.Model]float64 {
+	return nil
+}
+
+// Mock Picker
+type mockPicker struct{ mockPlugin }
+
+// compile-time type assertion
+var _ modelselector.Picker = &mockPicker{}
+
+func (m *mockPicker) Pick(ctx context.Context, cycleState *plugin.CycleState, scoredModels []*modelselector.ScoredModel) *modelselector.ProfileRunResult {
+	return nil
+}
+
 func registerTestPlugins(t *testing.T) {
 	t.Helper()
 
@@ -325,6 +441,11 @@ func registerTestPlugins(t *testing.T) {
 	plugin.Register(testPluginType,
 		func(name string, params json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
 			return &mockPlugin{t: plugin.TypedName{Name: name, Type: testPluginType}}, nil
+		})
+
+	plugin.Register(testProfilePicker,
+		func(name string, params json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+			return &mockProfilePicker{mockPlugin{t: plugin.TypedName{Name: name, Type: testProfilePicker}}}, nil
 		})
 
 	plugin.Register(testRequestProcType,

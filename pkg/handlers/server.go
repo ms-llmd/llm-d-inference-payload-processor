@@ -35,6 +35,7 @@ import (
 	logutil "github.com/llm-d/llm-d-inference-payload-processor/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-inference-payload-processor/pkg/framework/interface/plugin"
 	"github.com/llm-d/llm-d-inference-payload-processor/pkg/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-inference-payload-processor/pkg/metrics"
 	"github.com/llm-d/llm-d-inference-payload-processor/version"
 )
 
@@ -62,11 +63,12 @@ type Server struct {
 
 // RequestContext stores context information during the lifetime of an HTTP request.
 type RequestContext struct {
-	RequestReceivedTimestamp  time.Time
-	ResponseCompleteTimestamp time.Time
-	CycleState                *plugin.CycleState
-	Request                   *requesthandling.InferenceRequest
-	Response                  *requesthandling.InferenceResponse
+	RequestReceivedTimestamp    time.Time
+	ResponseFirstChunkTimestamp time.Time
+	ResponseCompleteTimestamp   time.Time
+	CycleState                  *plugin.CycleState
+	Request                     *requesthandling.InferenceRequest
+	Response                    *requesthandling.InferenceResponse
 }
 
 func (s *Server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
@@ -139,6 +141,9 @@ func (s *Server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 			loggerVerbose.Info("processing response headers complete")
 		case *extProcPb.ProcessingRequest_ResponseBody:
 			loggerVerbose.Info("Incoming response body chunk", "EoS", v.ResponseBody.EndOfStream)
+			if reqCtx.ResponseFirstChunkTimestamp.IsZero() {
+				reqCtx.ResponseFirstChunkTimestamp = time.Now()
+			}
 			responseBody = append(responseBody, v.ResponseBody.Body...)
 			if !v.ResponseBody.EndOfStream {
 				// Send an immediate response for this chunk so Envoy continues
@@ -153,6 +158,9 @@ func (s *Server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 				}
 				continue
 			}
+			reqCtx.ResponseCompleteTimestamp = time.Now()
+			model, _ := reqCtx.Request.Body["model"].(string)
+			metrics.RecordRequestTTFT(model, reqCtx.ResponseFirstChunkTimestamp.Sub(reqCtx.RequestReceivedTimestamp))
 			responses, err = s.HandleResponseBody(ctx, reqCtx, responseBody)
 			loggerVerbose.Info("processing response body complete")
 		case *extProcPb.ProcessingRequest_ResponseTrailers:
