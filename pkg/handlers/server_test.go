@@ -177,6 +177,10 @@ func TestHandleResponseBody_Streaming(t *testing.T) {
 			if err := process.Send(request); err != nil {
 				t.Fatalf("send response headers: %v", err)
 			}
+			// Discard the immediate header ack (HandleResponseHeaders always responds now).
+			if _, err := process.Recv(); err != nil {
+				t.Fatalf("recv header ack: %v", err)
+			}
 
 			for _, c := range tc.chunks {
 				request = &extProcPb.ProcessingRequest{
@@ -189,6 +193,12 @@ func TestHandleResponseBody_Streaming(t *testing.T) {
 				}
 				if err := process.Send(request); err != nil {
 					t.Fatalf("send response body chunk: %v", err)
+				}
+				// Discard the immediate ack for non-EoS chunks.
+				if !c.endOfStream {
+					if _, err := process.Recv(); err != nil {
+						t.Fatalf("recv chunk ack: %v", err)
+					}
 				}
 			}
 
