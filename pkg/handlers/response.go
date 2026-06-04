@@ -143,23 +143,32 @@ func (s *Server) HandleResponseTrailers(trailers *eppb.HttpTrailers) ([]*eppb.Pr
 // stream. It scans all "data:" lines for JSON objects and merges usage/model fields into
 // a single map that response plugins can process. This enables usage-tracking and metering
 // plugins to work with streaming responses from providers like Anthropic and OpenAI.
+// parseSSEResponseBody extracts a composite response body from an SSE (Server-Sent Events)
+// stream. It parses by SSE event boundaries instead of individual lines because one logical
+// event may legally contain multiple consecutive `data:` lines that must be joined before JSON decoding.
 func parseSSEResponseBody(body []byte) (map[string]any, error) {
 	result := map[string]any{}
 	lines := bytes.Split(body, []byte("\n"))
+	eventDataLines := make([][]byte, 0)
 
-	for _, line := range lines {
-		line = bytes.TrimSpace(line)
-		if !bytes.HasPrefix(line, []byte("data:")) {
-			continue
+	// flushEvent keeps the SSE framing logic local to this parser because the bug happens
+	// exactly at event boundaries: we must join all `data:` lines for one event before parsing.
+	flushEvent := func() {
+		if len(eventDataLines) == 0 {
+			return
 		}
-		data := bytes.TrimSpace(line[5:])
+
+		data := bytes.Join(eventDataLines, []byte("\n"))
+		eventDataLines = eventDataLines[:0]
+
+		data = bytes.TrimSpace(data)
 		if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
-			continue
+			return
 		}
 
 		var event map[string]any
 		if err := json.Unmarshal(data, &event); err != nil {
-			continue
+			return
 		}
 
 		if model, ok := event["model"].(string); ok && model != "" {
