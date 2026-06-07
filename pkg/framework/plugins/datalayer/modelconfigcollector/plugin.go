@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -54,11 +55,11 @@ type ModelsConfig struct {
 // ModelConfigDataSource watches a JSON file listing model names and keeps the
 // datastore in sync whenever the file changes.
 type ModelConfigDataSource struct {
-	typedName  plugin.TypedName
-	ds         datalayer.Datastore
-	modelsPath string
-	stopCh     chan struct{}
-	doneCh     chan struct{}
+	typedName     plugin.TypedName
+	ds            datalayer.Datastore
+	absModelsPath string
+	stopCh        chan struct{}
+	doneCh        chan struct{}
 }
 
 // DatasourceFactory creates a ModelConfigDataSource from the plugin handle and raw JSON config.
@@ -71,24 +72,28 @@ func DatasourceFactory(name string, rawCfg json.RawMessage, h plugin.Handle) (pl
 	if cfg.ModelsPath == "" {
 		return nil, errors.New("modelsPath is required")
 	}
-	info, err := os.Stat(cfg.ModelsPath)
+	absPath, err := filepath.Abs(cfg.ModelsPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve modelsPath %q: %w", cfg.ModelsPath, err)
+	}
+	info, err := os.Stat(absPath)
 	if err != nil {
 		return nil, err
 	}
 	if info.IsDir() {
 		return nil, errors.New("modelsPath must be a file, not a directory")
 	}
-	return NewModelConfigDataSource(name, cfg.ModelsPath, h.Datastore()), nil
+	return NewModelConfigDataSource(name, absPath, h.Datastore()), nil
 }
 
 // NewModelConfigDataSource constructs a ModelConfigDataSource wired to ds.
 func NewModelConfigDataSource(name, modelsPath string, ds datalayer.Datastore) *ModelConfigDataSource {
 	return &ModelConfigDataSource{
-		typedName:  plugin.TypedName{Type: PluginType, Name: name},
-		ds:         ds,
-		modelsPath: modelsPath,
-		stopCh:     make(chan struct{}),
-		doneCh:     make(chan struct{}),
+		typedName:     plugin.TypedName{Type: PluginType, Name: name},
+		ds:            ds,
+		absModelsPath: modelsPath,
+		stopCh:        make(chan struct{}),
+		doneCh:        make(chan struct{}),
 	}
 }
 
@@ -110,7 +115,7 @@ func (c *ModelConfigDataSource) Start(ctx context.Context) error {
 		return err
 	}
 
-	dir := filepath.Dir(c.modelsPath)
+	dir := filepath.Dir(c.absModelsPath)
 	if err := watcher.Add(dir); err != nil {
 		watcher.Close() //nolint:errcheck
 		return err
@@ -135,12 +140,7 @@ func (c *ModelConfigDataSource) Start(ctx context.Context) error {
 					logger.Error(err, "failed to resolve event path", "path", event.Name)
 					continue
 				}
-				absTarget, err := filepath.Abs(c.modelsPath)
-				if err != nil {
-					logger.Error(err, "failed to resolve target path", "path", c.modelsPath)
-					continue
-				}
-				if absEvent != absTarget {
+				if absEvent != c.absModelsPath {
 					continue
 				}
 				if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
@@ -148,7 +148,7 @@ func (c *ModelConfigDataSource) Start(ctx context.Context) error {
 						logger.Error(err, "failed to sync models after file change")
 					}
 				} else if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
-					logger.Info("models config file removed or renamed; waiting for replacement", "path", c.modelsPath)
+					logger.Info("models config file removed or renamed; waiting for replacement", "path", c.absModelsPath)
 				}
 			case err, ok := <-watcher.Errors:
 				if !ok {
@@ -173,7 +173,7 @@ func (c *ModelConfigDataSource) Stop() {
 func (c *ModelConfigDataSource) syncModels(ctx context.Context) error {
 	logger := log.FromContext(ctx).WithName("model-config-datasource")
 
-	data, err := os.ReadFile(c.modelsPath)
+	data, err := os.ReadFile(c.absModelsPath)
 	if err != nil {
 		return err
 	}
