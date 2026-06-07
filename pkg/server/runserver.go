@@ -35,10 +35,10 @@ import (
 
 // ExtProcServerRunner provides methods to manage an external process server.
 type ExtProcServerRunner struct {
-	GrpcPort        int
-	SecureServing   bool
-	RequestPlugins  []requesthandling.RequestProcessor
-	ResponsePlugins []requesthandling.ResponseProcessor
+	GrpcPort      int
+	SecureServing bool
+	ProfilePicker requesthandling.ProfilePicker
+	Profiles      map[string]*requesthandling.Profile
 }
 
 func NewDefaultExtProcServerRunner(port int) *ExtProcServerRunner {
@@ -67,7 +67,7 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 			srv = grpc.NewServer()
 		}
 
-		extProcPb.RegisterExternalProcessorServer(srv, handlers.NewServer(r.RequestPlugins, r.ResponsePlugins))
+		extProcPb.RegisterExternalProcessorServer(srv, handlers.NewServer(r.ProfilePicker, r.Profiles))
 
 		// Forward to the gRPC runnable.
 		return runnable.GRPCServer("ext-proc", srv, r.GrpcPort).Start(ctx)

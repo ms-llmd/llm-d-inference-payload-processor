@@ -64,8 +64,24 @@ type PayloadProcessorConfig struct {
 	PostProcessing *PluginRefList `json:"postProcessing"`
 
 	// +optional
-	// NotificationSources is an optional list of references to notification-source plugins to start.
-	NotificationSources []PluginRef `json:"notificationSources,omitempty"`
+	// Datalayer is an optional configuration for Collector, Extractor, and DataSource plugins
+	// registered with the built-in datalayer Processor.
+	Datalayer *DatalayerConfig `json:"datalayer,omitempty"`
+}
+
+// DatalayerConfig holds the plugin references for the three datalayer plugin categories.
+type DatalayerConfig struct {
+	// +optional
+	// Collectors is an optional list of references to Collector plugins.
+	Collectors []PluginRef `json:"collectors,omitempty"`
+
+	// +optional
+	// Extractors is an optional list of references to Extractor plugins.
+	Extractors []PluginRef `json:"extractors,omitempty"`
+
+	// +optional
+	// Datasources is an optional list of references to DataSource plugins.
+	Datasources []PluginRef `json:"datasources,omitempty"`
 }
 
 func (cfg PayloadProcessorConfig) String() string {
@@ -83,8 +99,8 @@ func (cfg PayloadProcessorConfig) String() string {
 	if cfg.PostProcessing != nil {
 		fmt.Fprintf(contents, ", PostProcessing: %v", cfg.PostProcessing)
 	}
-	if len(cfg.NotificationSources) > 0 {
-		fmt.Fprintf(contents, ", NotificationSources: %v", cfg.NotificationSources)
+	if cfg.Datalayer != nil {
+		fmt.Fprintf(contents, ", Datalayer: %v", cfg.Datalayer)
 	}
 
 	return "{" + contents.String() + "}"
@@ -176,10 +192,14 @@ func (prof Profile) String() string {
 
 // ProfilePlugins lists the set of references to instantiated plugins that will
 // be used for request and response processing respectively.
+// Plugins in the Request list may be RequestProcessor plugins or model-selector plugins
+// (Filter, Scorer, Picker); the loader routes each entry by the interface it implements.
 type ProfilePlugins struct {
 	// +optional
 	// Request is an optional ordered list of references to plugins
-	// that will process incoming requests before they are sent for inferencing
+	// that will process incoming requests before they are sent for inferencing.
+	// May include RequestProcessor plugins as well as model-selector plugins
+	// (Filter, Scorer with an optional weight, Picker).
 	Request []PluginRef `json:"request"`
 
 	// +optional
@@ -197,8 +217,15 @@ type PluginRef struct {
 	// is to the name of an entry of the Plugins defined in the
 	// configuration's Plugins section.
 	PluginRef string `json:"pluginRef"`
+
+	// +optional
+	// Weight is the weight to be used if this plugin is a Scorer.
+	Weight *float64 `json:"weight"`
 }
 
 func (pr PluginRef) String() string {
+	if pr.Weight != nil {
+		return fmt.Sprintf("{PluginRef: %s, Weight: %f}", pr.PluginRef, *pr.Weight)
+	}
 	return fmt.Sprintf("{PluginRef: %s}", pr.PluginRef)
 }

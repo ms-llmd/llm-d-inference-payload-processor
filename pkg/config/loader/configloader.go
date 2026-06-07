@@ -29,8 +29,12 @@ import (
 	configapi "github.com/llm-d/llm-d-inference-payload-processor/apix/config/v1alpha1"
 	config "github.com/llm-d/llm-d-inference-payload-processor/pkg/config"
 	"github.com/llm-d/llm-d-inference-payload-processor/pkg/framework/interface/datalayer/datasource"
+	"github.com/llm-d/llm-d-inference-payload-processor/pkg/framework/interface/modelselector"
 	"github.com/llm-d/llm-d-inference-payload-processor/pkg/framework/interface/plugin"
 	"github.com/llm-d/llm-d-inference-payload-processor/pkg/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-inference-payload-processor/pkg/framework/plugins/modelselector/picker/maxscore"
+	modelselectorplugin "github.com/llm-d/llm-d-inference-payload-processor/pkg/framework/plugins/requesthandling/modelselector"
+	ms "github.com/llm-d/llm-d-inference-payload-processor/pkg/modelselector"
 )
 
 var (
@@ -41,7 +45,7 @@ func init() {
 	utilruntime.Must(configapi.Install(scheme))
 }
 
-func LoadConfiguration(configBytes []byte, handle plugin.Handle, logger logr.Logger) (*config.Config, error) {
+func LoadConfiguration(configBytes []byte, handle plugin.Handle, processor datasource.DatalayerProcessor, logger logr.Logger) (*config.Config, error) {
 	rawConfig, err := loadRawConfiguration(configBytes, logger)
 	if err != nil {
 		return nil, err
@@ -70,33 +74,74 @@ func LoadConfiguration(configBytes []byte, handle plugin.Handle, logger logr.Log
 		return nil, err
 	}
 
-	notificationSources, err := buildDatalayer(rawConfig.NotificationSources, handle)
+	preProcessors, err := buildPreProcessors(rawConfig.PreProcessing, handle)
 	if err != nil {
-		logger.Error(err, "failed to load one or more notification sources")
+		logger.Error(err, "failed to load one or more pre-processors")
+		return nil, err
+	}
+
+	postProcessors, err := buildPostProcessors(rawConfig.PostProcessing, handle)
+	if err != nil {
+		logger.Error(err, "failed to load one or more post-processors")
+		return nil, err
+	}
+
+	if err = buildDatalayerSources(rawConfig.Datalayer, handle, processor); err != nil {
+		logger.Error(err, "failed to load one or more datalayer sources")
+		return nil, err
+	}
+
+	if err = buildModelSelector(profiles, handle); err != nil {
+		logger.Error(err, "failed to build model selector profiles")
 		return nil, err
 	}
 
 	return &config.Config{
-		ProfilePicker:       profilePicker,
-		Profiles:            profiles,
-		NotificationSources: notificationSources,
+		ProfilePicker:  profilePicker,
+		Profiles:       profiles,
+		PreProcessors:  preProcessors,
+		PostProcessors: postProcessors,
 	}, nil
 }
 
-func buildDatalayer(refs []configapi.PluginRef, handle plugin.Handle) ([]datasource.NotificationSource, error) {
-	sources := make([]datasource.NotificationSource, 0, len(refs))
-	for _, ref := range refs {
+func buildDatalayerSources(cfg *configapi.DatalayerConfig, handle plugin.Handle, processor datasource.DatalayerProcessor) error {
+	if cfg == nil {
+		return nil
+	}
+	for _, ref := range cfg.Collectors {
 		p := handle.Plugin(ref.PluginRef)
 		if p == nil {
-			return nil, fmt.Errorf("there is no plugin named %s", ref.PluginRef)
+			return fmt.Errorf("there is no plugin named %s", ref.PluginRef)
 		}
-		src, ok := p.(datasource.NotificationSource)
+		c, ok := p.(datasource.Collector)
 		if !ok {
-			return nil, fmt.Errorf("the plugin named %s is not a NotificationSource", ref.PluginRef)
+			return fmt.Errorf("plugin %q is not a Collector", ref.PluginRef)
 		}
-		sources = append(sources, src)
+		processor.RegisterCollector(c, c.CollectorFrequency())
 	}
-	return sources, nil
+	for _, ref := range cfg.Extractors {
+		p := handle.Plugin(ref.PluginRef)
+		if p == nil {
+			return fmt.Errorf("there is no plugin named %s", ref.PluginRef)
+		}
+		e, ok := p.(datasource.Extractor)
+		if !ok {
+			return fmt.Errorf("plugin %q is not an Extractor", ref.PluginRef)
+		}
+		processor.RegisterExtractor(e)
+	}
+	for _, ref := range cfg.Datasources {
+		p := handle.Plugin(ref.PluginRef)
+		if p == nil {
+			return fmt.Errorf("there is no plugin named %s", ref.PluginRef)
+		}
+		d, ok := p.(datasource.DataSource)
+		if !ok {
+			return fmt.Errorf("plugin %q is not a DataSource", ref.PluginRef)
+		}
+		processor.RegisterDatasource(d)
+	}
+	return nil
 }
 
 func loadRawConfiguration(configBytes []byte, logger logr.Logger) (*configapi.PayloadProcessorConfig, error) {
@@ -170,20 +215,34 @@ func buildProfiles(rawProfiles []configapi.Profile, handle plugin.Handle) (map[s
 		}
 
 		theProfile := requesthandling.Profile{
-			RequestPlugins:  make([]requesthandling.RequestProcessor, len(rawProfile.Plugins.Request)),
 			ResponsePlugins: make([]requesthandling.ResponseProcessor, len(rawProfile.Plugins.Response)),
 		}
 
-		for idx, pluginRef := range rawProfile.Plugins.Request {
+		for _, pluginRef := range rawProfile.Plugins.Request {
 			rawPlugin := handle.Plugin(pluginRef.PluginRef)
 			if rawPlugin == nil {
 				return nil, fmt.Errorf("there is no plugin named %s", pluginRef.PluginRef)
 			}
-			thePlugin, ok := rawPlugin.(requesthandling.RequestProcessor)
-			if !ok {
-				return nil, fmt.Errorf("the plugin named %s is not a RequestProcessor", pluginRef.PluginRef)
+			if reqPlugin, ok := rawPlugin.(requesthandling.RequestProcessor); ok {
+				theProfile.RequestPlugins = append(theProfile.RequestPlugins, reqPlugin)
+				continue
 			}
-			theProfile.RequestPlugins[idx] = thePlugin
+			// Not a RequestProcessor — must be a model-selector plugin (Filter/Scorer/Picker).
+			_, isFilter := rawPlugin.(modelselector.Filter)
+			_, isPicker := rawPlugin.(modelselector.Picker)
+			scorer, isScorer := rawPlugin.(modelselector.Scorer)
+			if !isFilter && !isScorer && !isPicker {
+				return nil, fmt.Errorf("plugin %q is not a RequestProcessor, Filter, Scorer, or Picker", pluginRef.PluginRef)
+			}
+			if isScorer {
+				if pluginRef.Weight == nil {
+					return nil, fmt.Errorf("scorer %q requires a weight", pluginRef.PluginRef)
+				}
+				// Wrap as WeightedScorer; AddPlugins will also check for Filter/Picker on the inner plugin.
+				theProfile.ModelSelectorPlugins = append(theProfile.ModelSelectorPlugins, ms.NewWeightedScorer(scorer, *pluginRef.Weight))
+			} else {
+				theProfile.ModelSelectorPlugins = append(theProfile.ModelSelectorPlugins, rawPlugin)
+			}
 		}
 
 		for idx, pluginRef := range rawProfile.Plugins.Response {
@@ -202,4 +261,69 @@ func buildProfiles(rawProfiles []configapi.Profile, handle plugin.Handle) (map[s
 	}
 
 	return profiles, nil
+}
+
+func buildPreProcessors(rawConfig *configapi.PluginRefList, handle plugin.Handle) ([]requesthandling.PreProcessor, error) {
+	if rawConfig == nil || len(rawConfig.Plugins) == 0 {
+		return []requesthandling.PreProcessor{}, nil
+	}
+
+	preProcessors := make([]requesthandling.PreProcessor, len(rawConfig.Plugins))
+
+	for idx, pluginRef := range rawConfig.Plugins {
+		rawPlugin := handle.Plugin(pluginRef.PluginRef)
+		if rawPlugin == nil {
+			return nil, fmt.Errorf("the referenced pre-processor plugin %s doesn't exist in the configuration", pluginRef.PluginRef)
+		}
+		if preProcessor, ok := rawPlugin.(requesthandling.PreProcessor); ok {
+			preProcessors[idx] = preProcessor
+		} else {
+			return nil, fmt.Errorf("the referenced plugin %s is not a pre-processor", pluginRef.PluginRef)
+		}
+	}
+
+	return preProcessors, nil
+}
+
+func buildPostProcessors(rawConfig *configapi.PluginRefList, handle plugin.Handle) ([]requesthandling.PostProcessor, error) {
+	if rawConfig == nil || len(rawConfig.Plugins) == 0 {
+		return []requesthandling.PostProcessor{}, nil
+	}
+
+	postProcessors := make([]requesthandling.PostProcessor, len(rawConfig.Plugins))
+
+	for idx, pluginRef := range rawConfig.Plugins {
+		rawPlugin := handle.Plugin(pluginRef.PluginRef)
+		if rawPlugin == nil {
+			return nil, fmt.Errorf("the referenced post-processor plugin %s doesn't exist in the configuration", pluginRef.PluginRef)
+		}
+		if postProcessor, ok := rawPlugin.(requesthandling.PostProcessor); ok {
+			postProcessors[idx] = postProcessor
+		} else {
+			return nil, fmt.Errorf("the referenced plugin %s is not a post-processor", pluginRef.PluginRef)
+		}
+	}
+
+	return postProcessors, nil
+}
+
+// buildModelSelector iterates all built profiles and, for each model-selector plugin found in
+// RequestPlugins, calls AddPlugins with the profile's ModelSelectorPlugins. If no Picker was
+// configured, MaxScorePicker is used as the default.
+func buildModelSelector(profiles map[string]*requesthandling.Profile, _ plugin.Handle) error {
+	for _, profile := range profiles {
+		for _, reqPlugin := range profile.RequestPlugins {
+			msPlugin, ok := reqPlugin.(*modelselectorplugin.ModelSelectorPlugin)
+			if !ok {
+				continue
+			}
+			if err := msPlugin.AddPlugins(profile.ModelSelectorPlugins...); err != nil {
+				return fmt.Errorf("failed to add plugins to model-selector %q: %w", msPlugin.TypedName().Name, err)
+			}
+			if msPlugin.Pipeline().Picker() == nil {
+				msPlugin.Pipeline().WithPicker(maxscore.NewMaxScorePicker())
+			}
+		}
+	}
+	return nil
 }

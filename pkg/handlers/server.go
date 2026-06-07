@@ -47,18 +47,18 @@ const (
 	responsePluginExtensionPoint = "response"
 )
 
-func NewServer(requestPlugins []requesthandling.RequestProcessor, responsePlugins []requesthandling.ResponseProcessor) *Server {
+func NewServer(profilePicker requesthandling.ProfilePicker, profiles map[string]*requesthandling.Profile) *Server {
 	return &Server{
-		requestPlugins:  requestPlugins,
-		responsePlugins: responsePlugins,
+		profilePicker: profilePicker,
+		profiles:      profiles,
 	}
 }
 
 // Server implements the Envoy external processing server.
 // https://www.envoyproxy.io/docs/envoy/latest/api-v3/service/ext_proc/v3/external_processor.proto
 type Server struct {
-	requestPlugins  []requesthandling.RequestProcessor
-	responsePlugins []requesthandling.ResponseProcessor
+	profilePicker requesthandling.ProfilePicker
+	profiles      map[string]*requesthandling.Profile
 }
 
 // RequestContext stores context information during the lifetime of an HTTP request.
@@ -66,6 +66,7 @@ type RequestContext struct {
 	RequestReceivedTimestamp    time.Time
 	ResponseFirstChunkTimestamp time.Time
 	ResponseCompleteTimestamp   time.Time
+	Profile                     *requesthandling.Profile
 	CycleState                  *plugin.CycleState
 	Request                     *requesthandling.InferenceRequest
 	Response                    *requesthandling.InferenceResponse
