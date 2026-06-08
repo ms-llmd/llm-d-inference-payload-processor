@@ -1,4 +1,10 @@
 payloadProcessor:
+  # Models to seed into the datastore at startup. The chart renders these into
+  # a models.json file inside the configmap, which the model-config-datasource
+  # plugin (configured below) reads from /config/models.json.
+  listModels:
+    - your-model-A
+    - your-model-B
   customConfig:
     plugins:
     - type: body-field-to-header
