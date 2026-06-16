@@ -40,7 +40,7 @@ import (
 
 const (
 	// PluginType is the identifier used when registering this extractor.
-	PluginType = "request-cost-metadata-extractor"
+	PluginType = "model-cost-extractor"
 
 	// defaultCompression matches the t-digest compression value used in the
 	// CostGuard proposal (docs/proposals/050-costguard-scorer/README.md).
@@ -172,6 +172,8 @@ func (e *RequestCostMetadataExtractor) Extract(ctx context.Context, events []dls
 
 	now := time.Now()
 	updated := map[string]bool{}
+	// Cache token prices per-model to avoid repeated lookups within this batch
+	tokenPricesCache := make(map[string]*pricing.TokenPrices)
 
 	for _, ev := range events {
 		if ev.Type != dlsrc.ResponseEventType {
@@ -203,10 +205,16 @@ func (e *RequestCostMetadataExtractor) Extract(ctx context.Context, events []dls
 			continue
 		}
 
-		tp, ok := lookupTokenPrices(e.ds, model)
+		// Check cache first; only lookup if not already cached
+		tp, ok := tokenPricesCache[model]
 		if !ok {
-			debugLogger.Info("model has no TokenPrices attribute, skipping cost sample", "model", model)
-			continue
+			found := false
+			tp, found = lookupTokenPrices(e.ds, model)
+			if !found {
+				debugLogger.Info("model has no TokenPrices attribute, skipping cost sample", "model", model)
+				continue
+			}
+			tokenPricesCache[model] = tp
 		}
 
 		cost := promptTokens*tp.InputTokenPrice + completionTokens*tp.OutputTokenPrice
@@ -223,23 +231,32 @@ func (e *RequestCostMetadataExtractor) Extract(ctx context.Context, events []dls
 		updated[model] = true
 	}
 
+	// After extracting all valid samples, pre-fetch accumulators for all models
+	// to avoid repeated lookups during flush.
+	modelToAcc := make(map[string]*modelCostAccumulator)
+	for model := range updated {
+		acc, err := e.getOrCreateAccumulator(model, now)
+		if err != nil {
+			debugLogger.Info("failed to create tdigest accumulator", "model", model, "err", err)
+			delete(updated, model) // mark as failed
+			continue
+		}
+		modelToAcc[model] = acc
+	}
+
 	// updated contains exactly the models that received a fresh sample in
 	// this batch, so the flushInterval gate below only consults
 	// tdigest accumulators whose digest actually changed since the last publish.
 	for model := range updated {
-		acc := e.state[model]
+		acc := modelToAcc[model]
 		// flushInterval == 0 means publish on every event
 		if e.flushInterval > 0 && now.Sub(acc.lastFlush) < e.flushInterval {
 			continue
 		}
 		acc.lastFlush = now
 		snapshot := acc.digest.Clone()
-		// TODO: using GetOrCreateModel() is potentially a problem, because instead of
-		// skipping the unconfigured models (in terms of pricing), we create
-		// empty models. To fix: extend the datastore interface to have Get()
-		// this is beyond the scope of this PR. Should handle in a separate PR
-		// and remove this TODO afterwards.
-		// Note that this is not a problem in requestmetadata. Only in this plugin.
+		// assumes that all models are configured with the pricing attributes and validated
+		// in the modelconfig collector
 		e.ds.GetOrCreateModel(model).GetAttributes().Put(
 			pricing.CostDigestAttributeKey,
 			&pricing.CostDigest{Digest: snapshot},
